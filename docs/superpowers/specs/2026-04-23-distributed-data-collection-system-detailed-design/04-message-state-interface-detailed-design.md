@@ -3,7 +3,7 @@
 ## 文档信息
 
 - 文档名称：`Distributed Data Collection System 消息、状态机与接口详细设计`
-- 文档版本：`v0.5`
+- 文档版本：`v0.6`
 - 文档状态：`Draft`
 - 创建日期：`2026-04-23`
 - 最后更新：`2026-04-23`
@@ -17,6 +17,7 @@
 | v0.3 | 2026-04-23 | 交叉一致性复核，统一与 Gateway 详细设计的共享接口字段定义 |
 | v0.4 | 2026-04-23 | 为动态分发补充迁移相关接口与共享字段语义 |
 | v0.5 | 2026-04-23 | 将动态分发相关接口标记为增强能力预留，并与逻辑架构首版边界保持一致 |
+| v0.6 | 2026-04-23 | 将公共模型与接口基线修订为多租户共享中心平台模型，补充 `tenantId` 字段与租户范围约束 |
 
 ## 1. 目的与范围
 
@@ -31,6 +32,11 @@
 
 本文档是 `Gateway` 与 `Agent / Connector` 设计的公共基线。
 
+说明：
+
+- 本文档中的共享模型和接口结构默认运行在多租户共享中心平台中
+- 除非对象天然绑定在单一租户上下文中，否则必须显式携带 `tenantId`
+
 ## 2. 核心数据模型
 
 ### 2.1 TaskDefinition
@@ -42,6 +48,7 @@
 | 字段 | 说明 |
 | --- | --- |
 | taskId | 任务标识 |
+| tenantId | 租户标识 |
 | taskName | 任务名称 |
 | connectorType | 所需 Connector 类型 |
 | triggerMode | 触发模式 |
@@ -62,6 +69,7 @@
 | 字段 | 说明 |
 | --- | --- |
 | desiredStateVersion | 目标状态版本 |
+| tenantId | 租户标识 |
 | taskBindings | 任务到实例绑定 |
 | targetInstances | 目标实例定义集合 |
 | ownershipAssignments | 当前 owner 分配信息 |
@@ -78,6 +86,7 @@
 | 字段 | 说明 |
 | --- | --- |
 | commandId | 命令标识 |
+| tenantId | 租户标识 |
 | commandType | 命令类型 |
 | desiredStateVersion | 关联目标版本 |
 | targetAgentId | 目标 Agent |
@@ -93,6 +102,7 @@
 
 | 字段 | 说明 |
 | --- | --- |
+| tenantScope | 生效租户范围 |
 | connectorType | 类型 |
 | packageVersion | 版本 |
 | packageUri | 下载定位 |
@@ -141,6 +151,7 @@
 | --- | --- |
 | transportMessageId | 传输层消息标识 |
 | recordDedupKey | 业务层去重键 |
+| tenantId | 租户标识 |
 | taskId | 任务标识 |
 | agentId | Agent 标识 |
 | connectorType | Connector 类型 |
@@ -156,6 +167,7 @@
 约束：
 
 - `metadata` 不参与路由、去重、状态管理或控制决策
+- `tenantId` 是控制、数据、审计与存储的统一隔离维度
 - `transportMessageId` 由 Agent 在消息写入本地持久化队列时生成
 - 同一条本地消息在重试上传时必须保持相同的 `transportMessageId`
 - `transportMessageId` 推荐包含 `agentId` 前缀，并结合本地唯一序列或高熵标识生成
@@ -278,6 +290,7 @@
 | 字段 | 说明 |
 | --- | --- |
 | agentId | Agent 标识 |
+| tenantId | 租户标识 |
 | agentInstanceId | 当前实例标识 |
 | nodeIdentity | 节点身份 |
 | agentVersion | 版本 |
@@ -305,6 +318,7 @@
 | 字段 | 说明 |
 | --- | --- |
 | agentId | Agent 标识 |
+| tenantId | 租户标识 |
 | currentDesiredStateVersion | 当前已应用版本 |
 | networkState | 网络状态 |
 | queueSummary | 本地队列摘要 |
@@ -325,6 +339,7 @@
 说明：
 
 - `DesiredStateSync` 与 `CommandPoll` 在第一版属于同一交互中的两个语义部分
+- Gateway 必须在 `tenantId` 范围内返回目标状态和命令，不得跨租户返回控制对象
 
 `backpressureHints` 结构建议至少包含：
 
@@ -347,6 +362,7 @@
 | 字段 | 说明 |
 | --- | --- |
 | commandId | 命令标识 |
+| tenantId | 租户标识 |
 | agentId | Agent 标识 |
 | desiredStateVersion | 对应版本 |
 | executionStatus | 执行结果 |
@@ -375,6 +391,7 @@
 | 字段 | 说明 |
 | --- | --- |
 | taskId | 任务标识 |
+| tenantId | 租户标识 |
 | collectionPartitionId | 分区标识，可选 |
 | sourceAgentId | 当前 owner Agent |
 | targetAgentSelector | 目标 Agent 选择条件 |
@@ -402,6 +419,7 @@
 | 字段 | 说明 |
 | --- | --- |
 | agentId | Agent 标识 |
+| tenantId | 租户标识 |
 | batchId | 批次标识 |
 | compressionType | 压缩方式 |
 | messageCount | 消息数量 |
@@ -430,6 +448,11 @@
 | retryAfterHint | 建议重试时间 |
 | gatewayAcceptTime | 接收时间 |
 
+说明：
+
+- `UploadBatch` 必须在租户范围内校验上传归属
+- `messages` 中的 `tenantId` 必须与请求上下文和 Agent 注册归属一致
+
 ### 6.2 FailedMessageQuery
 
 职责：
@@ -441,6 +464,7 @@
 | 字段 | 说明 |
 | --- | --- |
 | taskId | 任务标识 |
+| tenantId | 租户标识 |
 | agentId | Agent 标识 |
 | failureScope | 查询范围 |
 | transportMessageId | 传输层消息标识 |
@@ -452,7 +476,7 @@
 
 | 字段 | 说明 |
 | --- | --- |
-| failedMessages | 失败消息集合，元素至少包含 `transportMessageId`、`recordDedupKey`、`taskId`、`agentId`、`connectorInstanceId`、`failureStage`、`failureReason`、`firstFailureTime`、`lastFailureTime`、`retryCount`、`rawPayloadOrReference`、`failureContext` |
+| failedMessages | 失败消息集合，元素至少包含 `transportMessageId`、`recordDedupKey`、`tenantId`、`taskId`、`agentId`、`connectorInstanceId`、`failureStage`、`failureReason`、`firstFailureTime`、`lastFailureTime`、`retryCount`、`rawPayloadOrReference`、`failureContext` |
 | totalCount | 数量 |
 
 ### 6.3 ReportDrainStatus

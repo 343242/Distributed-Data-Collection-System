@@ -3,7 +3,7 @@
 ## 文档信息
 
 - 文档名称：`Distributed Data Collection System 数据存储与可靠落地详细设计`
-- 文档版本：`v0.3`
+- 文档版本：`v0.4`
 - 文档状态：`Draft`
 - 创建日期：`2026-04-23`
 - 最后更新：`2026-04-23`
@@ -15,6 +15,7 @@
 | v0.1 | 2026-04-23 | 建立数据存储与可靠落地详细设计，明确中心第一可靠落点、最终查询存储、失败隔离、保留与补偿策略 |
 | v0.2 | 2026-04-23 | 根据审阅意见澄清 Ingress Queue 与 Durable Ingest Storage 关系、Accepted 边界、失败隔离落点、Kafka 消费模型、保留周期与实例隔离策略 |
 | v0.3 | 2026-04-23 | 统一首版中间件决策表达，补全 Durable Ingest Storage 的公共消息字段，并对齐动态分发的首版边界说明 |
+| v0.4 | 2026-04-23 | 将存储专项设计修订为多租户共享中心平台模型，补充租户隔离、租户字段和租户范围下的重放与查询约束 |
 
 ## 1. 目的与范围
 
@@ -33,6 +34,11 @@
 - Connector 采集逻辑
 - 控制面模块拆分
 - 精确数据库表结构和索引语句
+
+说明：
+
+- 本文档基于多租户共享中心平台前提展开
+- `Durable Ingest Storage`、`Business Query Storage` 和失败隔离数据层都必须在租户维度下隔离
 
 ## 2. 存储分层总览
 
@@ -53,6 +59,7 @@
 - 提供可重放、可补偿、可追溯的数据保留能力
 - 与后续标准化、去重、路由、最终查询入库解耦
 - 在最终查询库存储变慢或不可用时继续保留待处理数据
+- 在共享中心平台中按租户维度隔离原始接入数据
 
 与 `Ingress Persistent Queue` 的关系：
 
@@ -71,6 +78,7 @@
 - 提供面向 `Business System` 的查询能力
 - 通过唯一约束或 `UPSERT` 实现幂等生效
 - 支持历史查询、补偿写入和结果重建
+- 在共享中心平台中按租户维度隔离结果数据和失败隔离数据
 
 ## 3. 数据从采集到入库的落地链路
 
@@ -128,6 +136,7 @@ Gateway Data Plane 的写入流程应满足：
 
 - `transportMessageId`
 - `recordDedupKey`
+- `tenantId`
 - `taskId`
 - `agentId`
 - `connectorType`
@@ -165,8 +174,8 @@ Gateway Data Plane 的写入流程应满足：
 
 分区键建议：
 
-- 默认使用 `taskId`
-- 若任务启用了 `Collection Partition`，则使用 `taskId + collectionPartitionId` 作为分区键
+- 默认使用 `tenantId + taskId`
+- 若任务启用了 `Collection Partition`，则使用 `tenantId + taskId + collectionPartitionId` 作为分区键
 
 offset 管理原则：
 
@@ -228,6 +237,8 @@ offset 管理原则：
 - 至少应满足：
   - Control Plane 元数据独立数据库 / 实例
   - Business Query Storage 独立数据库 / 实例
+- 在 `Business Query Storage` 内部，结果数据表和失败隔离表必须包含 `tenantId`
+- 唯一约束、查询过滤、重放过滤和补偿操作都必须以 `tenantId` 为前置条件
 
 ## 6. 原始数据、结果数据、失败隔离数据分层
 
@@ -271,6 +282,7 @@ offset 管理原则：
 
 - `transportMessageId`
 - `recordDedupKey`
+- `tenantId`
 - `taskId`
 - `agentId`
 - `connectorInstanceId`
@@ -296,6 +308,7 @@ offset 管理原则：
 
 - 不依赖 Kafka 的 EOS 特性来完成按消息 ID 的业务去重
 - 由 Gateway Ingress 维护短窗口接入确认账本，按 `transportMessageId` 判断是否为已接受消息
+- 接入确认账本中的幂等判断必须在租户范围内执行
 - Kafka 负责可靠落地和可重放，不直接承担消息 ID 级别的接入幂等判断
 
 ### 7.2 结果层幂等
@@ -361,6 +374,7 @@ offset 管理原则：
 
 重放范围建议至少支持按以下维度过滤：
 
+- `tenantId`
 - `taskId`
 - `agentId`
 - 时间范围
@@ -387,10 +401,12 @@ offset 管理原则：
 - `Kafka`
   - 中心第一可靠落点
   - 提供可重放日志能力
+  - 消息必须携带 `tenantId`，供后续处理、查询和重放隔离使用
 - `PostgreSQL`
   - 控制面元数据存储
   - 最终业务查询存储
   - 幂等结果写入
+  - 结果数据、失败隔离和查询过滤都必须按 `tenantId` 隔离
 - `ClickHouse`
   - 不作为第一版必交付
   - 后续按分析需求扩展

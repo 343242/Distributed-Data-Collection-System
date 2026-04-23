@@ -3,7 +3,7 @@
 ## 文档信息
 
 - 文档名称：`Distributed Data Collection System Gateway 详细设计`
-- 文档版本：`v0.7`
+- 文档版本：`v0.8`
 - 文档状态：`Draft`
 - 创建日期：`2026-04-23`
 - 最后更新：`2026-04-23`
@@ -19,6 +19,7 @@
 | v0.5 | 2026-04-23 | 明确 Data Plane 到存储的两层落地策略和第一版存储推荐方案 |
 | v0.6 | 2026-04-23 | 澄清 Ingress Persistent Queue、Durable Ingest Storage 和失败隔离存储的边界关系 |
 | v0.7 | 2026-04-23 | 统一首版存储产品决策、接入确认链路表述，并将动态分发接口标记为增强能力预留 |
+| v0.8 | 2026-04-23 | 将 Gateway 详细设计修订为多租户共享中心平台模型，补充租户范围校验、租户级监控审计和租户字段约束 |
 
 ## 1. 目的与范围
 
@@ -39,6 +40,11 @@
 - Connector 内部采集实现
 - 完整 API 协议细节
 
+说明：
+
+- 本文档基于“多租户共享中心平台”前提展开
+- Gateway 作为共享中心组件，必须对控制对象、数据对象、审计对象和存储对象执行租户范围隔离
+
 ## 2. Gateway 总体边界
 
 Gateway 是系统的中心枢纽，但在详细设计中必须严格区分两类职责：
@@ -49,6 +55,7 @@ Gateway 是系统的中心枢纽，但在详细设计中必须严格区分两类
 
 - 任务定义与状态管理
 - 目标配置与版本推进
+- 租户范围内的任务、配置和命令治理
 - Agent 注册与生命周期管理
 - 程序包与配置管理
 - 命令协调与下发
@@ -59,6 +66,7 @@ Gateway 是系统的中心枢纽，但在详细设计中必须严格区分两类
 负责：
 
 - Agent 上传数据接入
+- 租户归属识别与租户范围校验
 - 接入鉴权与基础校验
 - 接入持久化缓冲
 - 标准化
@@ -80,6 +88,7 @@ Gateway 是系统的中心枢纽，但在详细设计中必须严格区分两类
 - 维护任务状态
 - 维护 `desiredStateVersion`
 - 根据 `triggerMode` 和配置生成目标运行状态
+- 在租户范围内维护任务对象和运行约束
 
 输入：
 
@@ -100,6 +109,7 @@ Gateway 是系统的中心枢纽，但在详细设计中必须严格区分两类
 - 管理 Agent 注册与失效
 - 管理 Agent 当前状态、心跳、能力和负载
 - 维护 Agent 与实例映射
+- 校验 Agent 与租户归属绑定关系
 
 #### 3.1.3 Package & Config Management
 
@@ -108,11 +118,13 @@ Gateway 是系统的中心枢纽，但在详细设计中必须严格区分两类
 - 管理 `Connector Package` 元数据
 - 管理包版本、配置模板、兼容关系
 - 生成与发布目标配置
+- 在租户范围内管理可见程序包、配置模板和凭证引用
 
 关键元数据：
 
 | 字段 | 说明 |
 | --- | --- |
+| tenantScope | 生效租户范围 |
 | connectorType | Connector 类型 |
 | packageVersion | 程序包版本 |
 | packageUri | 包下载定位 |
@@ -150,6 +162,7 @@ Gateway 是系统的中心枢纽，但在详细设计中必须严格区分两类
 - 与 `desiredStateVersion` 协同
 - 维护命令状态与有效期
 - 避免冲突命令
+- 确保命令不会跨租户下发
 
 #### 3.1.5 Monitoring & Alerting
 
@@ -162,6 +175,7 @@ Gateway 是系统的中心枢纽，但在详细设计中必须严格区分两类
 监控粒度：
 
 - 系统级
+- 租户级
 - Agent 级
 - Task 级
 - `Connector Instance` 级
@@ -180,7 +194,7 @@ Gateway 是系统的中心枢纽，但在详细设计中必须严格区分两类
 
 - Agent 周期性通过 `HeartbeatAndDesiredStateSync` 上报轻量摘要
 - Data Plane 在接入、处理和失败隔离链路中生成内部运行指标
-- Monitoring & Alerting 负责按系统 / Agent / Task / Instance 四层聚合并输出告警
+- Monitoring & Alerting 负责按系统 / Tenant / Agent / Task / Instance 五层聚合并输出告警
 
 #### 3.1.6 Audit Log
 
@@ -202,6 +216,7 @@ Gateway 是系统的中心枢纽，但在详细设计中必须严格区分两类
 
 | 字段 | 说明 |
 | --- | --- |
+| tenantId | 租户标识 |
 | actionType | 操作类型 |
 | actionTarget | 操作对象 |
 | initiator | 发起者 |
@@ -220,6 +235,7 @@ Gateway 是系统的中心枢纽，但在详细设计中必须严格区分两类
 - 只有 Leader 负责目标状态变更、命令生成和版本推进
 - 非 Leader 可承担读流量和监控展示
 - Leader 切换后由新 Leader 接管写路径
+- 所有写路径都必须在租户范围校验通过后才允许提交
 
 细化约束：
 
@@ -235,20 +251,20 @@ Gateway 是系统的中心枢纽，但在详细设计中必须严格区分两类
 #### 3.3.1 Agent 注册流程
 
 1. Agent 携带节点身份发起注册
-2. Gateway 校验身份和部署边界
-3. 保存 Agent 元数据
+2. Gateway 校验身份、租户归属和部署边界
+3. 保存带租户归属的 Agent 元数据
 4. 返回初始控制面同步信息
 
 #### 3.3.2 心跳与状态同步流程
 
 1. Agent 周期性发送心跳和摘要状态
-2. Gateway 更新 Agent 状态
+2. Gateway 先校验租户归属，再更新 Agent 状态
 3. Gateway 返回最新 `desiredStateVersion` 与待处理命令
 
 #### 3.3.3 任务配置变更流程
 
 1. Business System 提交任务变更
-2. Task Management 生成新的目标状态
+2. Task Management 在租户范围内生成新的目标状态
 3. `desiredStateVersion` 递增
 4. Command Coordination 生成收敛命令
 5. Agent 在下次同步中拉取到最新版本
@@ -256,7 +272,7 @@ Gateway 是系统的中心枢纽，但在详细设计中必须严格区分两类
 #### 3.3.4 程序包发布与受控升级流程
 
 1. Business System 发布新的 `Connector Package` 版本元数据
-2. Package & Config Management 校验元数据完整性与配置兼容性
+2. Package & Config Management 在租户范围内校验元数据完整性与配置兼容性
 3. Task Management 生成引用新版本的目标配置
 4. `desiredStateVersion` 递增并生成收敛命令
 5. Agent 在同步后拉取新目标配置并主动下载程序包
@@ -268,9 +284,9 @@ Gateway 是系统的中心枢纽，但在详细设计中必须严格区分两类
 
 1. Agent 周期性上报心跳、运行摘要和关键错误摘要
 2. Data Plane 内部上报接入、处理、失败和背压指标
-3. Monitoring & Alerting 按四层粒度聚合指标并判断告警
+3. Monitoring & Alerting 按五层粒度聚合指标并判断告警
 4. Audit Log 对关键控制面操作写入审计记录
-5. Business System 查询运行视图或审计记录时，统一从 Gateway 侧读取
+5. Business System 查询运行视图或审计记录时，必须限定租户范围并统一从 Gateway 侧读取
 
 #### 3.3.6 动态分发 / Rebalancing 流程
 
@@ -310,6 +326,7 @@ Gateway 是系统的中心枢纽，但在详细设计中必须严格区分两类
 
 | 字段 | 说明 |
 | --- | --- |
+| tenantId | 租户标识 |
 | taskId | 任务标识 |
 | taskDefinition | 任务定义主体 |
 | operatorIdentity | 操作人身份 |
@@ -333,6 +350,7 @@ Gateway 是系统的中心枢纽，但在详细设计中必须严格区分两类
 
 | 字段 | 说明 |
 | --- | --- |
+| tenantId | 租户标识 |
 | taskId | 任务标识 |
 | lifecycleAction | 生命周期动作 |
 | operatorIdentity | 操作人身份 |
@@ -356,6 +374,7 @@ Gateway 是系统的中心枢纽，但在详细设计中必须严格区分两类
 
 | 字段 | 说明 |
 | --- | --- |
+| tenantId | 租户标识 |
 | connectorType | Connector 类型 |
 | packageMetadata | 程序包元数据 |
 | operatorIdentity | 操作人身份 |
@@ -379,6 +398,7 @@ Gateway 是系统的中心枢纽，但在详细设计中必须严格区分两类
 | 字段 | 说明 |
 | --- | --- |
 | queryScope | 查询范围 |
+| tenantId | 租户标识 |
 | taskId | 任务标识 |
 | agentId | Agent 标识 |
 | includeAudit | 是否包含审计摘要 |
@@ -406,6 +426,7 @@ Gateway 是系统的中心枢纽，但在详细设计中必须严格区分两类
 
 | 字段 | 说明 |
 | --- | --- |
+| tenantId | 租户标识 |
 | taskId | 任务标识 |
 | collectionPartitionId | 分区标识，可选 |
 | sourceAgentId | 当前 owner Agent |
@@ -432,6 +453,7 @@ Gateway 是系统的中心枢纽，但在详细设计中必须严格区分两类
 | 字段 | 说明 |
 | --- | --- |
 | agentId | Agent 逻辑标识 |
+| tenantId | 租户标识 |
 | agentInstanceId | 当前运行实例标识 |
 | nodeIdentity | 节点身份凭据 |
 | agentVersion | Agent 版本 |
@@ -459,6 +481,7 @@ Gateway 是系统的中心枢纽，但在详细设计中必须严格区分两类
 | 字段 | 说明 |
 | --- | --- |
 | agentId | Agent 标识 |
+| tenantId | 租户标识 |
 | currentDesiredStateVersion | Agent 当前已应用版本 |
 | networkState | 网络状态 |
 | queueSummary | 本地队列摘要 |
@@ -497,6 +520,7 @@ Gateway 是系统的中心枢纽，但在详细设计中必须严格区分两类
 | 字段 | 说明 |
 | --- | --- |
 | commandId | 命令标识 |
+| tenantId | 租户标识 |
 | agentId | Agent 标识 |
 | desiredStateVersion | 命令关联版本 |
 | executionStatus | 执行状态 |
@@ -520,6 +544,7 @@ Gateway 是系统的中心枢纽，但在详细设计中必须严格区分两类
 
 - 接收 Agent 上传批次
 - 执行基础鉴权、协议校验和请求合法性检查
+- 识别上传批次的租户归属并执行租户范围校验
 
 #### 4.1.2 Ingress Persistent Queue
 
@@ -547,12 +572,14 @@ Gateway 是系统的中心枢纽，但在详细设计中必须严格区分两类
 职责：
 
 - 基于 `transportMessageId` 和 `recordDedupKey` 执行幂等去重
+- 幂等判断必须在租户范围内执行，避免跨租户误判
 
 #### 4.1.5 Route
 
 职责：
 
 - 根据任务配置和数据类型选择目标存储路径
+- 根据租户归属、任务配置和数据类型选择目标存储路径
 
 #### 4.1.6 Storage Writer
 
@@ -564,6 +591,12 @@ Gateway 是系统的中心枢纽，但在详细设计中必须严格区分两类
 
 - `Ingress Persistent Queue`（其持久化后端为 `Durable Ingest Storage`）构成中心第一可靠落点
 - `Storage Writer` 负责将处理后的数据写入最终查询存储，而不是直接承担“先接住再说”的角色
+
+租户隔离约束：
+
+- `Durable Ingest Storage` 中的每条消息都必须具备租户归属
+- `Business Query Storage` 中的结果数据和失败隔离数据都必须按租户隔离
+- 任何查询、补偿和失败排查都不得跨租户读取
 
 第一版采用方案：
 
@@ -601,6 +634,7 @@ Gateway 是系统的中心枢纽，但在详细设计中必须严格区分两类
 | --- | --- |
 | transportMessageId | 传输层消息标识 |
 | recordDedupKey | 业务去重键 |
+| tenantId | 租户标识 |
 | taskId | 任务标识 |
 | agentId | Agent 标识 |
 | connectorInstanceId | 实例标识 |
@@ -617,7 +651,7 @@ Gateway 是系统的中心枢纽，但在详细设计中必须严格区分两类
 #### 4.2.1 上传接入流程
 
 1. Agent 发送批量上传请求
-2. Ingress Access 执行身份校验、协议校验和请求合法性检查
+2. Ingress Access 执行身份校验、租户归属校验、协议校验和请求合法性检查
 3. Ingress Persistent Queue 将批次写入其持久化后端 `Durable Ingest Storage`
 4. 写入成功后返回 `Accepted`
 5. Agent 将对应本地消息标记为已确认
@@ -631,7 +665,7 @@ Gateway 是系统的中心枢纽，但在详细设计中必须严格区分两类
 #### 4.2.2 处理入库流程
 
 1. Data Plane 从 `Ingress Persistent Queue` 的持久化后端 `Durable Ingest Storage` 异步消费消息
-2. 校验消费批次的完整性和上下文
+2. 校验消费批次的完整性、租户归属和上下文
 3. 将消息视为已进入中心可靠接入层
 4. 执行标准化与格式转换
 5. 执行基于 `transportMessageId` 的接入层幂等判断
@@ -703,6 +737,7 @@ Gateway 是系统的中心枢纽，但在详细设计中必须严格区分两类
 | 字段 | 说明 |
 | --- | --- |
 | agentId | Agent 标识 |
+| tenantId | 租户标识 |
 | batchId | 批次标识 |
 | compressionType | 压缩方式 |
 | messageCount | 消息数量 |
@@ -753,8 +788,13 @@ Gateway 是系统的中心枢纽，但在详细设计中必须严格区分两类
 
 | 字段 | 说明 |
 | --- | --- |
-| failedMessages | 失败消息集合，元素至少包含 `transportMessageId`、`recordDedupKey`、`taskId`、`agentId`、`connectorInstanceId`、`failureStage`、`failureReason`、`firstFailureTime`、`lastFailureTime`、`retryCount`、`rawPayloadOrReference`、`failureContext` |
+| failedMessages | 失败消息集合，元素至少包含 `transportMessageId`、`recordDedupKey`、`tenantId`、`taskId`、`agentId`、`connectorInstanceId`、`failureStage`、`failureReason`、`firstFailureTime`、`lastFailureTime`、`retryCount`、`rawPayloadOrReference`、`failureContext` |
 | totalCount | 总数 |
+
+说明：
+
+- `FailedMessageQuery` 必须在租户范围内执行
+- 不允许通过组合过滤条件跨租户读取失败隔离记录
 
 ## 5. Gateway 运行与控制重点
 
