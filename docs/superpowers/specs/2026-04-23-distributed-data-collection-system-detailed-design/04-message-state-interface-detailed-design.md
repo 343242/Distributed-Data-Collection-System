@@ -3,7 +3,7 @@
 ## 文档信息
 
 - 文档名称：`Distributed Data Collection System 消息、状态机与接口详细设计`
-- 文档版本：`v0.2`
+- 文档版本：`v0.3`
 - 文档状态：`Draft`
 - 创建日期：`2026-04-23`
 - 最后更新：`2026-04-23`
@@ -14,6 +14,7 @@
 | --- | --- | --- |
 | v0.1 | 2026-04-23 | 建立公共模型、状态机、接口和时间语义的基础骨架 |
 | v0.2 | 2026-04-23 | 根据审阅意见补充双层标识生成规则、去重层次、时间字段约束、Rebalancing 状态、backpressureHints、失败查询结构与统一错误结构 |
+| v0.3 | 2026-04-23 | 交叉一致性复核，统一与 Gateway 详细设计的共享接口字段定义 |
 
 ## 1. 目的与范围
 
@@ -279,6 +280,7 @@
 | 字段 | 说明 |
 | --- | --- |
 | registrationStatus | 注册结果 |
+| acceptedAgentId | Gateway 接受的 Agent 标识 |
 | currentDesiredStateVersion | 当前版本 |
 | controlSyncToken | 同步上下文 |
 
@@ -336,6 +338,7 @@
 | 字段 | 说明 |
 | --- | --- |
 | commandId | 命令标识 |
+| agentId | Agent 标识 |
 | desiredStateVersion | 对应版本 |
 | executionStatus | 执行结果 |
 | resultDetail | 详情 |
@@ -400,6 +403,7 @@
 | --- | --- |
 | taskId | 任务标识 |
 | agentId | Agent 标识 |
+| failureScope | 查询范围 |
 | transportMessageId | 传输层消息标识 |
 | recordDedupKey | 业务去重键 |
 | failureStage | 失败阶段 |

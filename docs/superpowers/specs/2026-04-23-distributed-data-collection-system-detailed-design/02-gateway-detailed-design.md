@@ -3,7 +3,7 @@
 ## 文档信息
 
 - 文档名称：`Distributed Data Collection System Gateway 详细设计`
-- 文档版本：`v0.2`
+- 文档版本：`v0.3`
 - 文档状态：`Draft`
 - 创建日期：`2026-04-23`
 - 最后更新：`2026-04-23`
@@ -14,6 +14,7 @@
 | --- | --- | --- |
 | v0.1 | 2026-04-23 | 建立 Gateway 详细设计骨架，明确 Control Plane / Data Plane 边界、核心流程和接口结构 |
 | v0.2 | 2026-04-23 | 根据审阅意见补充程序包与配置管理、监控审计、Leader 协调、异步接入解耦、背压传播链路、失败隔离字段与业务侧接口 |
+| v0.3 | 2026-04-23 | 交叉一致性复核，统一与公共接口文档的共享字段命名 |
 
 ## 1. 目的与范围
 
@@ -622,7 +623,7 @@ Gateway 是系统的中心枢纽，但在详细设计中必须严格区分两类
 | acceptedBatchId | 已接收批次标识 |
 | backpressureState | 当前背压状态 |
 | retryAfterHint | 建议重试间隔 |
-| serverAcceptTime | Gateway 接收时间 |
+| gatewayAcceptTime | Gateway 接收时间 |
 
 #### 4.5.2 Failed Message Query
 
