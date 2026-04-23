@@ -3,7 +3,7 @@
 ## 文档信息
 
 - 文档名称：`Distributed Data Collection System 数据存储与可靠落地详细设计`
-- 文档版本：`v0.2`
+- 文档版本：`v0.3`
 - 文档状态：`Draft`
 - 创建日期：`2026-04-23`
 - 最后更新：`2026-04-23`
@@ -14,6 +14,7 @@
 | --- | --- | --- |
 | v0.1 | 2026-04-23 | 建立数据存储与可靠落地详细设计，明确中心第一可靠落点、最终查询存储、失败隔离、保留与补偿策略 |
 | v0.2 | 2026-04-23 | 根据审阅意见澄清 Ingress Queue 与 Durable Ingest Storage 关系、Accepted 边界、失败隔离落点、Kafka 消费模型、保留周期与实例隔离策略 |
+| v0.3 | 2026-04-23 | 统一首版中间件决策表达，补全 Durable Ingest Storage 的公共消息字段，并对齐动态分发的首版边界说明 |
 
 ## 1. 目的与范围
 
@@ -24,7 +25,7 @@
 - 中心第一可靠落点如何与最终查询存储解耦
 - 原始数据、最终数据和失败隔离数据如何分层持久化
 - 如何通过存储设计实现“允许重复，但最大化不丢失”
-- 第一版推荐采用什么类型的存储产品组合
+- 第一版采用什么存储产品组合
 
 本文档不展开：
 
@@ -58,7 +59,7 @@
 - `Ingress Persistent Queue` 是 Gateway Data Plane 的逻辑接入队列抽象
 - `Durable Ingest Storage` 是该逻辑接入队列的持久化后端
 - 第一版中，两者在职责上不是两层串行写入，而是同一接入确认边界的“逻辑抽象 + 持久化实现”
-- 在第一版推荐方案下，`Ingress Persistent Queue` 的持久化后端就是 `Kafka`
+- 在第一版采用方案下，`Ingress Persistent Queue` 的持久化后端就是 `Kafka`
 
 ### 2.2 Business Query Storage
 
@@ -75,7 +76,7 @@
 
 完整落地链路如下：
 
-`Connector -> Agent Local Persistent Queue -> Gateway Ingress Persistent Queue -> Durable Ingest Storage -> Normalize / Transform -> Dedup / Route -> Business Query Storage`
+`Connector -> Agent Local Persistent Queue -> Gateway Ingress Persistent Queue / Durable Ingest Storage -> Normalize / Transform -> Dedup / Route -> Business Query Storage`
 
 这条链路中的关键确认边界如下：
 
@@ -129,7 +130,9 @@ Gateway Data Plane 的写入流程应满足：
 - `recordDedupKey`
 - `taskId`
 - `agentId`
+- `connectorType`
 - `connectorInstanceId`
+- `sourceId`
 - `checkpoint`
 - `sourceEventTime`
 - `collectTime`
@@ -138,11 +141,11 @@ Gateway Data Plane 的写入流程应满足：
 - `metadata`
 - `gatewayAcceptTime`
 
-### 4.4 第一版推荐实现类型
+### 4.4 第一版采用实现类型
 
-第一版推荐采用：
+第一版明确采用：
 
-- `Kafka` 或同类具备持久化、顺序写入、可重放能力的日志 / 队列型存储
+- `Kafka`
 
 原因：
 
@@ -150,8 +153,6 @@ Gateway Data Plane 的写入流程应满足：
 - 便于与后续处理链解耦
 - 支持消费失败后的重试和重放
 - 更符合“允许重复，但最大化不丢失”的目标
-
-当第一版规模较小且必须简化时，可暂时使用 Gateway 本地持久化接入表替代，但该方案不作为长期推荐路径。
 
 ### 4.5 Kafka 消费模型
 
@@ -205,9 +206,9 @@ offset 管理原则：
 - 写入动作允许重试
 - 最终生效由唯一键 / 幂等约束保证
 
-### 5.3 第一版推荐实现类型
+### 5.3 第一版采用实现类型
 
-第一版推荐采用：
+第一版明确采用：
 
 - `PostgreSQL`
 
@@ -367,14 +368,15 @@ offset 管理原则：
 
 与动态分发的关系：
 
+- 本节仅约束未来增强能力的存储语义，不代表第一版默认启用动态分发
 - 存储重放与 `checkpoint` 交接是两套不同语义
 - 动态分发中的 `checkpoint` 交接决定“新 owner 从源端哪里继续采”
 - 存储重放决定“中心已接收但未完成处理的数据如何重新进入处理链”
 - 迁移后的重放仍按中心侧已接收数据执行，不要求源端重新读取
 
-## 9. 第一版推荐落地方案
+## 9. 第一版落地方案
 
-第一版推荐存储组合如下：
+第一版采用的存储组合如下：
 
 - `Durable Ingest Storage`：`Kafka`
 - `Business Query Storage`：`PostgreSQL`

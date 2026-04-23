@@ -3,7 +3,7 @@
 ## 文档信息
 
 - 文档名称：`Distributed Data Collection System Gateway 详细设计`
-- 文档版本：`v0.6`
+- 文档版本：`v0.7`
 - 文档状态：`Draft`
 - 创建日期：`2026-04-23`
 - 最后更新：`2026-04-23`
@@ -18,6 +18,7 @@
 | v0.4 | 2026-04-23 | 补充动态分发 / Rebalancing 的控制面编排流程和迁移接口语义 |
 | v0.5 | 2026-04-23 | 明确 Data Plane 到存储的两层落地策略和第一版存储推荐方案 |
 | v0.6 | 2026-04-23 | 澄清 Ingress Persistent Queue、Durable Ingest Storage 和失败隔离存储的边界关系 |
+| v0.7 | 2026-04-23 | 统一首版存储产品决策、接入确认链路表述，并将动态分发接口标记为增强能力预留 |
 
 ## 1. 目的与范围
 
@@ -273,6 +274,11 @@ Gateway 是系统的中心枢纽，但在详细设计中必须严格区分两类
 
 #### 3.3.6 动态分发 / Rebalancing 流程
 
+说明：
+
+- 本节描述的是增强能力预留，不属于第一版核心交付范围
+- 第一版若未启用动态分发，则不生成迁移编排，也不对外开放相关操作入口
+
 1. Task Management 根据负载、Agent 健康状态或运维指令决定触发迁移评估
 2. 若任务或 `Collection Partition` 支持迁移，则将 Task 状态置为 `Rebalancing`
 3. Command Coordination 生成原 Agent 的 `DrainAndSeal` 指令和目标 Agent 的准备指令
@@ -390,6 +396,11 @@ Gateway 是系统的中心枢纽，但在详细设计中必须严格区分两类
 职责：
 
 - 触发任务级或分区级的动态分发
+
+说明：
+
+- 该接口仅在启用动态分发增强能力时开放
+- 第一版基础闭环默认不对外开放该接口
 
 请求结构示意：
 
@@ -522,7 +533,7 @@ Gateway 是系统的中心枢纽，但在详细设计中必须严格区分两类
 
 - `Ingress Persistent Queue` 是 Gateway Data Plane 内部的逻辑接入队列抽象
 - 第一版中，其持久化后端就是 `Durable Ingest Storage`
-- 在推荐方案下，`Ingress Persistent Queue` 物理上由 `Kafka` 承接
+- 在第一版采用方案下，`Ingress Persistent Queue` 物理上由 `Kafka` 承接
 - 因此“写入 Ingress Persistent Queue 成功”和“写入 Durable Ingest Storage 成功”在第一版中是同一确认边界
 
 #### 4.1.3 Normalize / Transform
@@ -551,18 +562,17 @@ Gateway 是系统的中心枢纽，但在详细设计中必须严格区分两类
 
 第一版存储分层职责：
 
-- `Ingress Persistent Queue` 与后续 `Durable Ingest Storage` 共同承担中心第一可靠落点职责
+- `Ingress Persistent Queue`（其持久化后端为 `Durable Ingest Storage`）构成中心第一可靠落点
 - `Storage Writer` 负责将处理后的数据写入最终查询存储，而不是直接承担“先接住再说”的角色
 
-第一版推荐方案：
+第一版采用方案：
 
 - `Durable Ingest Storage`
-  - 推荐使用具备持久化、顺序写入、可重放能力的接入日志 / 队列型存储
-  - 第一版产品建议优先选择 `Kafka` 或同类持久化日志队列
-  - 当数据量较小且希望第一版简化时，可暂时以内嵌持久化接入表替代，但不作为长期首选
+  - 第一版明确采用 `Kafka`
+  - 其职责是承接 Data Plane 的中心第一可靠落点，而不是直接承担最终业务查询
 - `Business Query Storage`
-  - 推荐使用具备事务能力、唯一约束和 `UPSERT` 语义的事务型数据库作为第一版最终业务存储
-  - 第一版产品建议优先选择 `PostgreSQL`
+  - 第一版明确采用 `PostgreSQL`
+  - 其职责是承接最终业务查询、幂等落库和失败隔离存储
   - 若后续以分析查询为主，可增设分析型存储作为下游副本，而不替代第一可靠落点
   - 分析型副本若后续单独建设，可优先考虑 `ClickHouse` 一类列式分析存储
 
@@ -620,7 +630,7 @@ Gateway 是系统的中心枢纽，但在详细设计中必须严格区分两类
 
 #### 4.2.2 处理入库流程
 
-1. Data Plane 从 Ingress Persistent Queue 异步消费消息
+1. Data Plane 从 `Ingress Persistent Queue` 的持久化后端 `Durable Ingest Storage` 异步消费消息
 2. 校验消费批次的完整性和上下文
 3. 将消息视为已进入中心可靠接入层
 4. 执行标准化与格式转换

@@ -3,7 +3,7 @@
 ## 文档信息
 
 - 文档名称：`Distributed Data Collection System 总体逻辑架构方案`
-- 文档版本：`v0.5`
+- 文档版本：`v0.6`
 - 文档状态：`Reviewed Draft`
 - 创建日期：`2026-04-22`
 - 最后更新：`2026-04-23`
@@ -17,6 +17,7 @@
 | v0.3 | 2026-04-23 | 根据审阅意见补齐安全边界、Control Plane / Data Plane、网络分区、背压、消息标识、配置版本、程序包分发、日志审计、时间语义与需求追溯 |
 | v0.4 | 2026-04-23 | 明确存储分层、中心第一可靠落点、最终查询存储职责和数据状态流转边界 |
 | v0.5 | 2026-04-23 | 将存储选型、Control Plane 写路径、默认离线策略和动态分发首版边界收口为明确架构决策 |
+| v0.6 | 2026-04-23 | 统一 `Accepted` 边界、存储状态顺序和第一版中间件决策表达，消除与详细设计文档的跨文档歧义 |
 
 ## 1. 文档定位
 
@@ -36,7 +37,7 @@
 - 具体接口字段定义
 - 数据库表结构设计
 - 部署脚本与运维脚本
-- 具体技术选型和中间件实现细节
+- 中间件的低层部署参数、Topic / 表级设计与实现细节
 - 明确性能容量数值
 
 ## 2. 设计目标
@@ -674,18 +675,18 @@ Agent 对每个 `Connector Instance` 负责：
 
 第一版产品决策如下：
 
-- `Durable Ingest Storage`：采用 `Kafka` 或同等能力的持久化日志队列
-- `Business Query Storage`：采用 `PostgreSQL`
+- `Durable Ingest Storage`：第一版明确采用 `Kafka`
+- `Business Query Storage`：第一版明确采用 `PostgreSQL`
 - 分析型存储不纳入第一版必交付范围
 
 ### 19.6 数据状态流转与存储边界
 
-从采集到存储的数据状态建议定义为：
+从采集到存储的数据状态定义如下：
 
 - `Collected`
 - `AgentPersisted`
-- `GatewayAccepted`
 - `GatewayBuffered`
+- `GatewayAccepted`
 - `Processed`
 - `Stored`
 - `FailedIsolated`
@@ -697,12 +698,12 @@ Agent 对每个 `Connector Instance` 负责：
 - `AgentPersisted`
   - Agent 已完成本地原子提交
   - 到此为止现场侧应尽量不丢
-- `GatewayAccepted`
-  - Gateway 已确认接收
-  - Agent 可清理对应本地消息
 - `GatewayBuffered`
   - 数据已进入中心侧第一可靠落点
   - 后续处理失败不再要求 Agent 重发
+- `GatewayAccepted`
+  - Gateway 已在确认数据进入中心第一可靠落点后返回接收成功
+  - Agent 可清理对应本地消息
 - `Processed`
   - 已完成标准化、去重、路由
 - `Stored`
@@ -769,7 +770,7 @@ Agent 本地持久化队列必须具备：
 
 ### 21.1 内部处理链路
 
-`Agent Upload -> Gateway Access -> Auth/Validation -> Ingress Persistent Queue -> Ack to Agent -> Durable Ingest Storage -> Normalize/Transform -> Dedup/Idempotency -> Route -> Storage Writer -> Business Query Storage`
+`Agent Upload -> Gateway Access -> Auth/Validation -> Ingress Persistent Queue / Durable Ingest Storage -> Ack to Agent -> Normalize/Transform -> Dedup/Idempotency -> Route -> Storage Writer -> Business Query Storage`
 
 ### 21.2 失败分类
 
