@@ -3,7 +3,7 @@
 ## 文档信息
 
 - 文档名称：`Distributed Data Collection System 总体逻辑架构方案`
-- 文档版本：`v0.3`
+- 文档版本：`v0.4`
 - 文档状态：`Reviewed Draft`
 - 创建日期：`2026-04-22`
 - 最后更新：`2026-04-23`
@@ -15,6 +15,7 @@
 | v0.1 | 2026-04-22 | 建立逻辑架构骨架，明确核心组件、基本链路和职责边界 |
 | v0.2 | 2026-04-22 | 补充 Gateway / Agent / Connector 分层、可靠性设计和动态分发初步方案 |
 | v0.3 | 2026-04-23 | 根据审阅意见补齐安全边界、Control Plane / Data Plane、网络分区、背压、消息标识、配置版本、程序包分发、日志审计、时间语义与需求追溯 |
+| v0.4 | 2026-04-23 | 明确存储分层、中心第一可靠落点、最终查询存储职责和数据状态流转边界 |
 
 ## 1. 文档定位
 
@@ -277,8 +278,26 @@
 
 `Data Storage` 负责：
 
-- 存储原始数据、标准化数据和历史记录
-- 为业务查询和后续消费提供支撑
+- 承担中心侧的数据持久化职责，但逻辑上拆分为两层：
+  - `Durable Ingest Storage`
+  - `Business Query Storage`
+- 为业务查询、历史追溯和后续消费提供支撑
+
+#### Durable Ingest Storage
+
+用于承接 Gateway Data Plane 已确认接收的数据，是中心侧第一可靠落点。其职责为：
+
+- 先可靠接住 Agent 上传的数据
+- 与后续标准化、去重、路由和最终入库解耦
+- 在下游处理或最终查询库抖动时，仍可保留待处理数据
+
+#### Business Query Storage
+
+用于存放最终可查询、可消费的数据结果。其职责为：
+
+- 存储标准化和去重后的业务数据
+- 提供面向业务系统的查询能力
+- 支持历史查询、补偿写入和幂等更新
 
 ### 9.4 Client Agent
 
@@ -629,6 +648,61 @@ Agent 对每个 `Connector Instance` 负责：
 - Gateway 只有在将上传数据可靠写入自身接入持久化缓冲后，才返回 `Accepted`
 - Agent 收到 `Accepted` 后，后续处理责任全部由 `Gateway Data Plane` 接管
 
+### 19.5 中心存储分层策略
+
+为了满足“允许重复，但最大化不丢数”的目标，中心侧存储不应只设计成一个最终查询库，而应采用分层落地策略：
+
+- 第一层：`Durable Ingest Storage`
+  - 作为 Gateway 中心侧第一可靠落点
+  - 优先保证“先接住，再处理”
+- 第二层：`Business Query Storage`
+  - 作为最终查询和业务消费存储
+  - 允许通过幂等写、重试和补偿完成最终一致入库
+
+设计原则：
+
+- 防丢优先于查询便利
+- 接入确认与最终入库解耦
+- 最终存储允许幂等去重，不要求端到端 exactly-once
+
+第一版建议：
+
+- `Durable Ingest Storage` 采用具备持久化和可重放能力的接入缓冲层
+- `Business Query Storage` 采用支持事务和唯一约束 / UPSERT 语义的最终存储
+- 是否引入独立消息日志系统或单独分析型存储，由详细设计和容量目标决定
+
+### 19.6 数据状态流转与存储边界
+
+从采集到存储的数据状态建议定义为：
+
+- `Collected`
+- `AgentPersisted`
+- `GatewayAccepted`
+- `GatewayBuffered`
+- `Processed`
+- `Stored`
+- `FailedIsolated`
+
+其边界如下：
+
+- `Collected`
+  - Connector 已从源端读取数据
+- `AgentPersisted`
+  - Agent 已完成本地原子提交
+  - 到此为止现场侧应尽量不丢
+- `GatewayAccepted`
+  - Gateway 已确认接收
+  - Agent 可清理对应本地消息
+- `GatewayBuffered`
+  - 数据已进入中心侧第一可靠落点
+  - 后续处理失败不再要求 Agent 重发
+- `Processed`
+  - 已完成标准化、去重、路由
+- `Stored`
+  - 已写入最终查询存储
+- `FailedIsolated`
+  - 无法正常处理的数据已进入失败隔离区，等待排查或补偿
+
 ## 20. 网络分区、离线策略与背压
 
 ### 20.1 Agent 网络状态
@@ -687,7 +761,7 @@ Agent 本地持久化队列必须具备：
 
 ### 21.1 内部处理链路
 
-`Agent Upload -> Gateway Access -> Auth/Validation -> Ingress Persistent Queue -> Ack to Agent -> Normalize/Transform -> Dedup/Idempotency -> Route -> Storage Writer -> Data Storage`
+`Agent Upload -> Gateway Access -> Auth/Validation -> Ingress Persistent Queue -> Ack to Agent -> Durable Ingest Storage -> Normalize/Transform -> Dedup/Idempotency -> Route -> Storage Writer -> Business Query Storage`
 
 ### 21.2 失败分类
 
@@ -883,6 +957,7 @@ Gateway 侧集中保存审计日志，至少覆盖：
 - Connector `Checkpoint` 机制
 - Agent 本地原子提交
 - Gateway 接入持久化与幂等去重
+- 中心侧“先可靠接入、再最终查询”的存储分层
 - 任务状态与实例状态管理
 - Gateway 程序包下发和运行监控
 - 安全通信、基本审计、日志摘要汇聚
