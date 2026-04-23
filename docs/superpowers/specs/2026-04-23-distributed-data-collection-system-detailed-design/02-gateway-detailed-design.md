@@ -3,7 +3,7 @@
 ## 文档信息
 
 - 文档名称：`Distributed Data Collection System Gateway 详细设计`
-- 文档版本：`v0.5`
+- 文档版本：`v0.6`
 - 文档状态：`Draft`
 - 创建日期：`2026-04-23`
 - 最后更新：`2026-04-23`
@@ -17,6 +17,7 @@
 | v0.3 | 2026-04-23 | 交叉一致性复核，统一与公共接口文档的共享字段命名 |
 | v0.4 | 2026-04-23 | 补充动态分发 / Rebalancing 的控制面编排流程和迁移接口语义 |
 | v0.5 | 2026-04-23 | 明确 Data Plane 到存储的两层落地策略和第一版存储推荐方案 |
+| v0.6 | 2026-04-23 | 澄清 Ingress Persistent Queue、Durable Ingest Storage 和失败隔离存储的边界关系 |
 
 ## 1. 目的与范围
 
@@ -517,6 +518,13 @@ Gateway 是系统的中心枢纽，但在详细设计中必须严格区分两类
 - 仅在写入成功后返回 `Accepted`
 - 作为 Data Plane 接入确认边界，与后续处理链异步解耦
 
+与 `Durable Ingest Storage` 的关系：
+
+- `Ingress Persistent Queue` 是 Gateway Data Plane 内部的逻辑接入队列抽象
+- 第一版中，其持久化后端就是 `Durable Ingest Storage`
+- 在推荐方案下，`Ingress Persistent Queue` 物理上由 `Kafka` 承接
+- 因此“写入 Ingress Persistent Queue 成功”和“写入 Durable Ingest Storage 成功”在第一版中是同一确认边界
+
 #### 4.1.3 Normalize / Transform
 
 职责：
@@ -571,6 +579,12 @@ Gateway 是系统的中心枢纽，但在详细设计中必须严格区分两类
 - 记录无法正常完成处理的消息
 - 支持后续排查与补偿
 
+落地边界：
+
+- `Failed Message Handling` 是 Data Plane 的处理模块
+- 其持久化落点是失败隔离存储，而不是 `Durable Ingest Storage` 本身
+- 第一版中，失败隔离数据默认落在 `Business Query Storage` 的独立隔离 schema / 表中
+
 最小记录字段：
 
 | 字段 | 说明 |
@@ -594,10 +608,15 @@ Gateway 是系统的中心枢纽，但在详细设计中必须严格区分两类
 
 1. Agent 发送批量上传请求
 2. Ingress Access 执行身份校验、协议校验和请求合法性检查
-3. Ingress Persistent Queue 写入批次
+3. Ingress Persistent Queue 将批次写入其持久化后端 `Durable Ingest Storage`
 4. 写入成功后返回 `Accepted`
 5. Agent 将对应本地消息标记为已确认
 6. 后续处理链异步消费该批次，不阻塞接入确认
+
+说明：
+
+- 第一版中，`Accepted` 的返回边界就是 Kafka 追加成功
+- 不要求消息已经写入最终查询存储后才确认
 
 #### 4.2.2 处理入库流程
 
@@ -612,6 +631,11 @@ Gateway 是系统的中心枢纽，但在详细设计中必须严格区分两类
 9. 记录处理结果和时间语义
 10. 对失败消息执行重试、退避或隔离
 11. 标记处理完成或转入失败隔离区
+
+说明：
+
+- 对于不可恢复失败，必须先完成失败隔离写入，再视为该消息处理结束
+- 失败隔离写入成功后，后续不再要求 Agent 重发该消息
 
 ### 4.3 数据面失败语义
 

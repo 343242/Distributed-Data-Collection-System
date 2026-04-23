@@ -3,7 +3,7 @@
 ## 文档信息
 
 - 文档名称：`Distributed Data Collection System 数据存储与可靠落地详细设计`
-- 文档版本：`v0.1`
+- 文档版本：`v0.2`
 - 文档状态：`Draft`
 - 创建日期：`2026-04-23`
 - 最后更新：`2026-04-23`
@@ -13,6 +13,7 @@
 | 版本 | 日期 | 修订摘要 |
 | --- | --- | --- |
 | v0.1 | 2026-04-23 | 建立数据存储与可靠落地详细设计，明确中心第一可靠落点、最终查询存储、失败隔离、保留与补偿策略 |
+| v0.2 | 2026-04-23 | 根据审阅意见澄清 Ingress Queue 与 Durable Ingest Storage 关系、Accepted 边界、失败隔离落点、Kafka 消费模型、保留周期与实例隔离策略 |
 
 ## 1. 目的与范围
 
@@ -51,6 +52,13 @@
 - 提供可重放、可补偿、可追溯的数据保留能力
 - 与后续标准化、去重、路由、最终查询入库解耦
 - 在最终查询库存储变慢或不可用时继续保留待处理数据
+
+与 `Ingress Persistent Queue` 的关系：
+
+- `Ingress Persistent Queue` 是 Gateway Data Plane 的逻辑接入队列抽象
+- `Durable Ingest Storage` 是该逻辑接入队列的持久化后端
+- 第一版中，两者在职责上不是两层串行写入，而是同一接入确认边界的“逻辑抽象 + 持久化实现”
+- 在第一版推荐方案下，`Ingress Persistent Queue` 的持久化后端就是 `Kafka`
 
 ### 2.2 Business Query Storage
 
@@ -101,12 +109,17 @@ Gateway Data Plane 的写入流程应满足：
 1. Agent 发送上传批次
 2. Gateway 完成接入鉴权和基础校验
 3. Gateway 将批次写入 `Ingress Persistent Queue`
-4. Gateway 将消息写入 `Durable Ingest Storage` 或确认其已由接入持久化层可靠承接
+4. `Ingress Persistent Queue` 将批次可靠追加到其持久化后端 `Durable Ingest Storage`
 5. 只有在这一步成功后，Gateway 才返回 `Accepted`
 
 换句话说：
 - `Accepted` 的含义不是“已经写入最终查询库”
 - 而是“已经进入中心第一可靠落点”
+
+第一版明确边界：
+
+- 写入 `Kafka` 成功即视为 `Ingress Persistent Queue` 写入成功
+- 不要求再额外同步写第二份中心接入存储后才返回 `Accepted`
 
 ### 4.3 数据内容
 
@@ -118,6 +131,7 @@ Gateway Data Plane 的写入流程应满足：
 - `agentId`
 - `connectorInstanceId`
 - `checkpoint`
+- `sourceEventTime`
 - `collectTime`
 - `payloadFormat`
 - `payload`
@@ -138,6 +152,38 @@ Gateway Data Plane 的写入流程应满足：
 - 更符合“允许重复，但最大化不丢失”的目标
 
 当第一版规模较小且必须简化时，可暂时使用 Gateway 本地持久化接入表替代，但该方案不作为长期推荐路径。
+
+### 4.5 Kafka 消费模型
+
+第一版采用 `Kafka` 时，消费模型定义如下：
+
+- Producer：
+  - `Gateway Ingress Access` / `Ingress Persistent Queue` 写入 Kafka
+- Consumer：
+  - `Gateway Data Plane Processing Worker` 作为消费组读取 Kafka
+
+分区键建议：
+
+- 默认使用 `taskId`
+- 若任务启用了 `Collection Partition`，则使用 `taskId + collectionPartitionId` 作为分区键
+
+offset 管理原则：
+
+- 只有当消息完成以下任一结果后，消费者才提交 offset：
+  - 成功写入 `Business Query Storage`
+  - 成功写入失败隔离存储
+- 若发生瞬时失败，则不提交 offset，交由重试和退避机制处理
+- 若发生不可恢复的数据质量失败，在失败隔离写入成功后提交 offset，避免阻塞分区
+
+接入层幂等原则：
+
+- Kafka 本身不是按 `transportMessageId` 做业务去重的组件
+- Gateway Ingress 必须维护一份短窗口的 `transportMessageId` 接入确认账本
+- 当 Agent 重试上传时：
+  - 若确认账本中已存在同一 `transportMessageId` 的已接收记录，则 Gateway 直接返回已接受结果
+  - 若不存在，则继续执行写入
+
+该账本的实现可与 Gateway 接入元数据一并持久化，但不改变“Kafka 是中心第一可靠落点”的架构决策
 
 ## 5. Business Query Storage 详细设计
 
@@ -174,6 +220,14 @@ Gateway Data Plane 的写入流程应满足：
 
 若后续分析查询成为主要场景，可增加列式分析存储副本，例如 `ClickHouse`，但不替代第一版的最终结果主存储。
 
+隔离策略：
+
+- 第一版 `PostgreSQL` 虽然同时用于控制面元数据和最终结果存储，但必须采用隔离部署
+- 不允许控制面元数据和高吞吐业务结果写入共用同一个逻辑实例
+- 至少应满足：
+  - Control Plane 元数据独立数据库 / 实例
+  - Business Query Storage 独立数据库 / 实例
+
 ## 6. 原始数据、结果数据、失败隔离数据分层
 
 ### 6.1 原始接入数据层
@@ -201,6 +255,17 @@ Gateway Data Plane 的写入流程应满足：
 
 对无法正常完成处理的数据，应单独保留失败隔离记录，而不直接丢弃。
 
+与 `Failed Message Handling` 的关系：
+
+- `Failed Message Handling` 是 Gateway Data Plane 中负责写入失败隔离记录的处理模块
+- 失败隔离数据层是该模块对应的持久化落点
+
+第一版落点策略：
+
+- 失败隔离数据默认存放在 `Business Query Storage` 的独立隔离 schema / 表中
+- `rawPayloadOrReference` 可直接保存原始载荷，也可保存回指 `Durable Ingest Storage` 的引用
+- 因此失败隔离是一个独立逻辑数据层，但第一版物理上不单独引入第三种数据库产品
+
 至少保留：
 
 - `transportMessageId`
@@ -225,6 +290,12 @@ Gateway Data Plane 的写入流程应满足：
 目标：
 
 - Agent 重试上传不会导致同一条接入消息被无限重复接收
+
+第一版实现说明：
+
+- 不依赖 Kafka 的 EOS 特性来完成按消息 ID 的业务去重
+- 由 Gateway Ingress 维护短窗口接入确认账本，按 `transportMessageId` 判断是否为已接受消息
+- Kafka 负责可靠落地和可重放，不直接承担消息 ID 级别的接入幂等判断
 
 ### 7.2 结果层幂等
 
@@ -259,6 +330,19 @@ Gateway Data Plane 的写入流程应满足：
 - 结果层写入重试
 - 人工补偿与重放窗口
 
+第一版建议：
+
+- `Durable Ingest Storage` 默认保留期建议为 `7 天`
+- 在存储资源受限场景下，不应低于 `72 小时`
+- 失败隔离数据保留期建议为 `30 天`
+
+保留周期决策因素：
+
+- 处理链最大重试时间
+- 人工补偿窗口
+- 业务历史追溯要求
+- 存储成本与容量规划
+
 ### 8.2 补偿原则
 
 当处理链某一环节失败时：
@@ -273,6 +357,20 @@ Gateway Data Plane 的写入流程应满足：
 - 来源于 `Durable Ingest Storage` 中已确认接收的数据
 - 重放时仍走标准化、去重、路由和最终入库流程
 - 最终依赖 `recordDedupKey` 实现幂等生效
+
+重放范围建议至少支持按以下维度过滤：
+
+- `taskId`
+- `agentId`
+- 时间范围
+- 失败阶段
+
+与动态分发的关系：
+
+- 存储重放与 `checkpoint` 交接是两套不同语义
+- 动态分发中的 `checkpoint` 交接决定“新 owner 从源端哪里继续采”
+- 存储重放决定“中心已接收但未完成处理的数据如何重新进入处理链”
+- 迁移后的重放仍按中心侧已接收数据执行，不要求源端重新读取
 
 ## 9. 第一版推荐落地方案
 
@@ -302,6 +400,22 @@ Gateway Data Plane 的写入流程应满足：
 - 仅使用最终业务库直接承接 Gateway 上传并作为第一可靠落点
 - 让最终查询库存同时承担接入缓冲、失败补偿和业务查询全部职责
 - 以分析型存储替代中心第一可靠落点
+
+### 9.2 第一版容量规划建议
+
+第一版容量规划至少应覆盖以下维度：
+
+- Kafka topic 保留期与保留容量
+- Kafka 分区数与副本数
+- PostgreSQL 结果表空间增长速度
+- 失败隔离表增长速度
+
+第一版建议范围：
+
+- Kafka topic 分区数：按 `taskId` 并发度和消费并行度预估，首版不应少于 `3`
+- Kafka 副本数：生产环境建议 `3`
+- Kafka `min.insync.replicas`：建议不低于 `2`
+- PostgreSQL 应为结果数据和失败隔离数据预留独立表空间或独立存储配额
 
 ## 10. 与其他详细设计文档的关系
 
