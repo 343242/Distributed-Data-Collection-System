@@ -3,10 +3,17 @@
 ## 文档信息
 
 - 文档名称：`Distributed Data Collection System 消息、状态机与接口详细设计`
-- 文档版本：`v0.1`
+- 文档版本：`v0.2`
 - 文档状态：`Draft`
 - 创建日期：`2026-04-23`
 - 最后更新：`2026-04-23`
+
+## 修订历史
+
+| 版本 | 日期 | 修订摘要 |
+| --- | --- | --- |
+| v0.1 | 2026-04-23 | 建立公共模型、状态机、接口和时间语义的基础骨架 |
+| v0.2 | 2026-04-23 | 根据审阅意见补充双层标识生成规则、去重层次、时间字段约束、Rebalancing 状态、backpressureHints、失败查询结构与统一错误结构 |
 
 ## 1. 目的与范围
 
@@ -89,6 +96,12 @@
 | configSchemaVersion | 配置 schema 版本 |
 | runtimeCompatibility | 运行兼容性说明 |
 
+使用说明：
+
+- `PackageMetadata` 由 Gateway Control Plane 管理和发布
+- Agent 通过 `desiredState.packageRequirements` 识别所需包版本，再按 `packageUri` 主动拉取
+- 具体发布与获取流程见 `02` 和 `03`
+
 ### 2.5 CheckpointModel
 
 关键字段：
@@ -105,6 +118,15 @@
 
 - `Checkpoint` 不仅是位点值
 - 还必须包含恢复时需要的源端上下文
+
+`sourceContext` 至少应覆盖：
+
+| 字段 | 说明 |
+| --- | --- |
+| sourcePartitionIdentity | 源分区、文件或分片标识 |
+| sourceCursorContext | cursor / offset / 文件位置等上下文 |
+| sourceSchemaOrSnapshotHint | 恢复时所需的源端 schema 或快照提示 |
+| sourceSessionHint | 必要时用于恢复连接上下文的会话提示 |
 
 ### 2.6 CollectionMessage
 
@@ -129,27 +151,55 @@
 约束：
 
 - `metadata` 不参与路由、去重、状态管理或控制决策
-- `transportMessageId` 推荐包含 `agentId` 前缀
+- `transportMessageId` 由 Agent 在消息写入本地持久化队列时生成
+- 同一条本地消息在重试上传时必须保持相同的 `transportMessageId`
+- `transportMessageId` 推荐包含 `agentId` 前缀，并结合本地唯一序列或高熵标识生成
+- `recordDedupKey` 的去重语义由 `Connector Type` 定义，并由 Agent 随消息一并持久化和上传
+
+`transportMessageId` 生成规则：
+
+- 生成时机：Agent 将消息成功写入本地持久化队列时
+- 唯一性范围：单系统实例内全局唯一
+- 稳定性要求：消息重试上传时保持不变
+- 推荐格式：`<agentId>-<localSequenceOrTime>-<highEntropySuffix>`
+
+`recordDedupKey` 生成规则：
+
+- 若源端存在稳定唯一主键，则优先使用 `sourceId + sourceRecordId`
+- 若源端无天然主键但存在稳定 checkpoint 与局部记录标识，则使用 `sourceId + checkpoint + subRecordKey`
+- 若两者都不存在，则使用关键业务字段归一化后生成摘要键
+- 同一条源记录在重复采集时应尽量生成相同的 `recordDedupKey`
+
+去重层次：
+
+- Gateway Ingress 基于 `transportMessageId` 执行接入层幂等去重
+- Gateway Processing / Storage 基于 `recordDedupKey` 执行业务层去重与最终入库幂等
 
 ## 3. 时间语义
 
 系统定义以下时间语义：
 
-| 字段 | 说明 | 产生方 |
-| --- | --- | --- |
-| sourceEventTime | 源数据产生时间 | 源端或 Connector |
-| collectTime | Connector 采到数据时间 | Connector |
-| agentPersistTime | Agent 本地持久化成功时间 | Agent |
-| gatewayAcceptTime | Gateway 接收成功时间 | Gateway Data Plane |
-| processedTime | Gateway 完成处理时间 | Gateway Data Plane |
-| storedTime | 数据入库存储时间 | Storage Writer |
-| commandIssuedTime | 命令生成时间 | Gateway Control Plane |
-| commandExpireTime | 命令失效时间 | Gateway Control Plane |
+| 字段 | 说明 | 产生方 | 要求 |
+| --- | --- | --- | --- |
+| sourceEventTime | 源数据产生时间 | 源端或 Connector | 可选，源端缺失时可为空 |
+| collectTime | Connector 采到数据时间 | Connector | 必填 |
+| agentPersistTime | Agent 本地持久化成功时间 | Agent | 必填 |
+| gatewayAcceptTime | Gateway 接收成功时间 | Gateway Data Plane | 对已接收批次必填 |
+| processedTime | Gateway 完成处理时间 | Gateway Data Plane | 对已处理消息必填 |
+| storedTime | 数据入库存储时间 | Storage Writer | 对成功入库消息必填 |
+| commandIssuedTime | 命令生成时间 | Gateway Control Plane | 命令类对象必填 |
+| commandExpireTime | 命令失效时间 | Gateway Control Plane | 对具备失效语义的命令必填 |
 
 原则：
 
 - 各节点需具备基础时间同步能力，例如 `NTP`
 - 不把全局时间戳排序作为唯一一致性依据
+
+完整性约束：
+
+- 采集链路至少应保证 `collectTime -> agentPersistTime -> gatewayAcceptTime` 的语义链条可追踪
+- 若消息完成处理和入库，则 `processedTime`、`storedTime` 不应早于前置时间
+- 时间字段的消费方只能按语义使用，不应把跨节点时间先后当作唯一一致性依据
 
 ## 4. 状态机设计
 
@@ -160,6 +210,7 @@
 - `Draft`
 - `Scheduled`
 - `Deploying`
+- `Rebalancing`
 - `Running`
 - `Paused`
 - `Failed`
@@ -172,11 +223,14 @@
 | Draft | 启用任务 | Scheduled |
 | Scheduled | 开始收敛 | Deploying |
 | Deploying | 实例就绪 | Running |
+| Running | 触发迁移或重分配 | Rebalancing |
+| Rebalancing | 迁移完成 | Running |
+| Rebalancing | 迁移失败 | Failed |
 | Running | 人工暂停 | Paused |
 | Paused | 恢复 | Running |
 | Running | 自动恢复失败 | Failed |
 | Failed | 重新部署 | Deploying |
-| Running / Paused / Failed | 停止 | Stopped |
+| Running / Paused / Failed / Rebalancing | 停止 | Stopped |
 
 ### 4.2 Connector Instance 状态机
 
@@ -254,11 +308,22 @@
 | targetDesiredStateVersion | 目标版本 |
 | desiredState | 最新目标状态 |
 | pendingCommands | 命令集合 |
+| backpressureHints | 背压建议 |
 | serverTime | 服务器时间 |
 
 说明：
 
 - `DesiredStateSync` 与 `CommandPoll` 在第一版属于同一交互中的两个语义部分
+
+`backpressureHints` 结构建议至少包含：
+
+| 字段 | 说明 |
+| --- | --- |
+| gatewayPressureLevel | Gateway 当前压力级别 |
+| suggestedUploadConcurrency | 建议上传并发 |
+| suggestedRetryAfter | 建议重试间隔 |
+| lowPriorityThrottleHint | 低优先级任务降速建议 |
+| pauseRecommendation | 是否建议暂停可暂停任务 |
 
 ### 5.3 ReportCommandResult
 
@@ -299,6 +364,19 @@
 | compressionType | 压缩方式 |
 | messageCount | 消息数量 |
 | messages | 消息集合 |
+| uploadContext | 上传上下文 |
+
+`uploadContext` 结构建议至少包含：
+
+| 字段 | 说明 |
+| --- | --- |
+| currentQueueDepth | Agent 当前本地队列深度 |
+| localWatermarkState | Agent 当前水位状态 |
+| uploadAttempt | 当前上传尝试次数 |
+| networkState | Agent 当前网络状态 |
+| desiredStateVersion | Agent 当前已应用目标版本 |
+| firstMessageCollectTime | 本批次首条消息采集时间 |
+| lastMessageCollectTime | 本批次末条消息采集时间 |
 
 响应结构：
 
@@ -322,6 +400,8 @@
 | --- | --- |
 | taskId | 任务标识 |
 | agentId | Agent 标识 |
+| transportMessageId | 传输层消息标识 |
+| recordDedupKey | 业务去重键 |
 | failureStage | 失败阶段 |
 | timeRange | 时间范围 |
 
@@ -329,10 +409,24 @@
 
 | 字段 | 说明 |
 | --- | --- |
-| failedMessages | 失败消息摘要 |
+| failedMessages | 失败消息集合，元素至少包含 `transportMessageId`、`recordDedupKey`、`taskId`、`agentId`、`connectorInstanceId`、`failureStage`、`failureReason`、`firstFailureTime`、`lastFailureTime`、`retryCount`、`rawPayloadOrReference`、`failureContext` |
 | totalCount | 数量 |
 
 ## 7. 错误与响应语义
+
+### 7.0 通用错误结构
+
+建议控制面与数据面错误统一使用如下结构：
+
+| 字段 | 说明 |
+| --- | --- |
+| errorCode | 错误码 |
+| errorCategory | 错误类别 |
+| message | 错误摘要 |
+| retryable | 是否可重试 |
+| retryAfterHint | 建议重试时间 |
+| correlationId | 关联请求或链路标识 |
+| detail | 补充错误详情 |
 
 ### 7.1 控制面错误语义
 
@@ -344,6 +438,14 @@
 - `UnsupportedCapability`
 - `RejectedByPolicy`
 
+建议错误码示例：
+
+- `CP_INVALID_IDENTITY`
+- `CP_EXPIRED_COMMAND`
+- `CP_STALE_DESIRED_STATE`
+- `CP_UNSUPPORTED_CAPABILITY`
+- `CP_REJECTED_BY_POLICY`
+
 ### 7.2 数据面错误语义
 
 建议错误类别：
@@ -353,6 +455,14 @@
 - `TemporaryUnavailable`
 - `InvalidBatch`
 - `AuthenticationFailed`
+
+建议错误码示例：
+
+- `DP_INGRESS_REJECTED`
+- `DP_BACKPRESSURE_APPLIED`
+- `DP_TEMPORARY_UNAVAILABLE`
+- `DP_INVALID_BATCH`
+- `DP_AUTHENTICATION_FAILED`
 
 ### 7.3 Gateway 处理链失败分类
 
