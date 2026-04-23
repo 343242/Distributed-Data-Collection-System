@@ -3,7 +3,7 @@
 ## 文档信息
 
 - 文档名称：`Distributed Data Collection System 消息、状态机与接口详细设计`
-- 文档版本：`v0.3`
+- 文档版本：`v0.4`
 - 文档状态：`Draft`
 - 创建日期：`2026-04-23`
 - 最后更新：`2026-04-23`
@@ -15,6 +15,7 @@
 | v0.1 | 2026-04-23 | 建立公共模型、状态机、接口和时间语义的基础骨架 |
 | v0.2 | 2026-04-23 | 根据审阅意见补充双层标识生成规则、去重层次、时间字段约束、Rebalancing 状态、backpressureHints、失败查询结构与统一错误结构 |
 | v0.3 | 2026-04-23 | 交叉一致性复核，统一与 Gateway 详细设计的共享接口字段定义 |
+| v0.4 | 2026-04-23 | 为动态分发补充迁移相关接口与共享字段语义 |
 
 ## 1. 目的与范围
 
@@ -62,6 +63,7 @@
 | desiredStateVersion | 目标状态版本 |
 | taskBindings | 任务到实例绑定 |
 | targetInstances | 目标实例定义集合 |
+| ownershipAssignments | 当前 owner 分配信息 |
 | packageRequirements | 程序包要求 |
 | configRequirements | 配置要求 |
 | effectiveTime | 生效时间 |
@@ -79,6 +81,7 @@
 | desiredStateVersion | 关联目标版本 |
 | targetAgentId | 目标 Agent |
 | targetInstanceId | 目标实例 |
+| collectionPartitionId | 目标分区，可选 |
 | issuedAt | 生成时间 |
 | expireAt | 失效时间 |
 | commandPayload | 命令参数 |
@@ -350,6 +353,31 @@
 | --- | --- |
 | accepted | 是否接收 |
 
+### 5.4 TriggerRebalance
+
+职责：
+
+- 触发任务级或分区级迁移编排
+
+请求结构：
+
+| 字段 | 说明 |
+| --- | --- |
+| taskId | 任务标识 |
+| collectionPartitionId | 分区标识，可选 |
+| sourceAgentId | 当前 owner Agent |
+| targetAgentSelector | 目标 Agent 选择条件 |
+| rebalanceReason | 迁移原因 |
+| operatorIdentity | 操作人身份 |
+
+响应结构：
+
+| 字段 | 说明 |
+| --- | --- |
+| accepted | 是否接受 |
+| rebalanceStatus | 迁移状态 |
+| targetDesiredStateVersion | 迁移目标版本 |
+
 ## 6. 数据面接口结构
 
 ### 6.1 UploadBatch
@@ -415,6 +443,29 @@
 | --- | --- |
 | failedMessages | 失败消息集合，元素至少包含 `transportMessageId`、`recordDedupKey`、`taskId`、`agentId`、`connectorInstanceId`、`failureStage`、`failureReason`、`firstFailureTime`、`lastFailureTime`、`retryCount`、`rawPayloadOrReference`、`failureContext` |
 | totalCount | 数量 |
+
+### 6.3 ReportDrainStatus
+
+职责：
+
+- 上报迁移过程中旧 owner 的 `drain` 进度
+
+请求结构：
+
+| 字段 | 说明 |
+| --- | --- |
+| instanceId | 实例标识 |
+| drainStatus | 当前 drain 状态 |
+| lastCommittedCheckpoint | 最近可靠 checkpoint |
+| pendingQueueDepth | 剩余本地积压 |
+| drainEventTime | 状态时间 |
+
+响应结构：
+
+| 字段 | 说明 |
+| --- | --- |
+| accepted | 是否已记录 |
+| nextActionHint | 后续动作建议 |
 
 ## 7. 错误与响应语义
 

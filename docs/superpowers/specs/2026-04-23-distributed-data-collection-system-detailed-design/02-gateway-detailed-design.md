@@ -3,7 +3,7 @@
 ## 文档信息
 
 - 文档名称：`Distributed Data Collection System Gateway 详细设计`
-- 文档版本：`v0.3`
+- 文档版本：`v0.4`
 - 文档状态：`Draft`
 - 创建日期：`2026-04-23`
 - 最后更新：`2026-04-23`
@@ -15,6 +15,7 @@
 | v0.1 | 2026-04-23 | 建立 Gateway 详细设计骨架，明确 Control Plane / Data Plane 边界、核心流程和接口结构 |
 | v0.2 | 2026-04-23 | 根据审阅意见补充程序包与配置管理、监控审计、Leader 协调、异步接入解耦、背压传播链路、失败隔离字段与业务侧接口 |
 | v0.3 | 2026-04-23 | 交叉一致性复核，统一与公共接口文档的共享字段命名 |
+| v0.4 | 2026-04-23 | 补充动态分发 / Rebalancing 的控制面编排流程和迁移接口语义 |
 
 ## 1. 目的与范围
 
@@ -268,6 +269,27 @@ Gateway 是系统的中心枢纽，但在详细设计中必须严格区分两类
 4. Audit Log 对关键控制面操作写入审计记录
 5. Business System 查询运行视图或审计记录时，统一从 Gateway 侧读取
 
+#### 3.3.6 动态分发 / Rebalancing 流程
+
+1. Task Management 根据负载、Agent 健康状态或运维指令决定触发迁移评估
+2. 若任务或 `Collection Partition` 支持迁移，则将 Task 状态置为 `Rebalancing`
+3. Command Coordination 生成原 Agent 的 `DrainAndSeal` 指令和目标 Agent 的准备指令
+4. 原 Agent 停止继续拉取新数据，并继续刷写本地已采集消息
+5. 原 Agent 上报最后一个可靠 `checkpoint`、本地积压状态和 `drainStatus`
+6. Gateway 校验原 Agent 已达到可交接边界后，将交接 `checkpoint` 写入新的 `desiredState`
+7. 目标 Agent 拉取到新的目标状态，准备程序包、配置和 `startCheckpoint`
+8. 目标 Agent 启动新实例并上报 `readySignal`
+9. Gateway 确认新实例 ready 后，将 owner 切换到目标 Agent
+10. 原 Agent 停止旧实例并完成清理
+11. Task 状态从 `Rebalancing` 回到 `Running`
+
+约束：
+
+- 同一任务或同一 `Collection Partition` 在任一时刻只能有一个有效 owner
+- Owner 切换必须以已确认的可靠 `checkpoint` 为边界
+- 迁移过程中允许少量重复，但不得出现无界并发双采
+- 若任一步骤失败，Gateway 必须保留或恢复原 owner，避免任务进入悬空状态
+
 ### 3.4 控制面接口职责
 
 #### 3.4.1 UpsertTaskDefinition
@@ -361,7 +383,32 @@ Gateway 是系统的中心枢纽，但在详细设计中必须严格区分两类
 | activeAlerts | 当前告警 |
 | auditSummary | 审计摘要 |
 
-#### 3.4.5 AgentRegister
+#### 3.4.5 TriggerRebalance
+
+职责：
+
+- 触发任务级或分区级的动态分发
+
+请求结构示意：
+
+| 字段 | 说明 |
+| --- | --- |
+| taskId | 任务标识 |
+| collectionPartitionId | 分区标识，可选 |
+| sourceAgentId | 当前 owner Agent |
+| targetAgentSelector | 目标 Agent 选择条件 |
+| rebalanceReason | 迁移原因 |
+| operatorIdentity | 操作人身份 |
+
+响应结构示意：
+
+| 字段 | 说明 |
+| --- | --- |
+| accepted | 是否接受 |
+| rebalanceStatus | 迁移编排状态 |
+| targetDesiredStateVersion | 迁移对应的目标版本 |
+
+#### 3.4.6 AgentRegister
 
 职责：
 
@@ -387,7 +434,7 @@ Gateway 是系统的中心枢纽，但在详细设计中必须严格区分两类
 | currentDesiredStateVersion | 当前目标状态版本 |
 | controlSyncToken | 控制同步上下文 |
 
-#### 3.4.6 HeartbeatAndDesiredStateSync
+#### 3.4.7 HeartbeatAndDesiredStateSync
 
 职责：
 
@@ -426,7 +473,7 @@ Gateway 是系统的中心枢纽，但在详细设计中必须严格区分两类
 | lowPriorityThrottleHint | 低优先级任务降速建议 |
 | pauseRecommendation | 是否建议暂停可暂停任务 |
 
-#### 3.4.7 ReportCommandResult
+#### 3.4.8 ReportCommandResult
 
 职责：
 
