@@ -135,6 +135,8 @@
 
 `Checkpoint` 表示 `Connector` 针对源端采集进度维护的位点语义。它不限定必须是数字 offset，也可以是时间戳、cursor、主键值、文件位置、日志偏移等。
 
+`Checkpoint` 不应仅包含单一位点值，还应包含足以在重启、恢复或迁移后继续采集所需的源端上下文信息。
+
 ### 6.6 Message
 
 `Message` 表示一条统一采集消息，是 `Connector` 采集并由 `Agent` 可靠传输到 `Data Gateway` 的标准数据载体。
@@ -219,6 +221,8 @@
 - `Data Plane` 多实例通过负载均衡承接上传流量
 - 控制命令必须具备全局唯一 `commandId` 和幂等执行能力
 - 同一任务或同一 Agent 的目标状态变更必须串行化提交，避免冲突命令
+
+第一版建议 `Control Plane` 写路径采用“单 Leader + 共享元数据存储”策略，由 Leader 负责目标状态变更、命令生成和版本推进，以降低多实例协调复杂度。
 
 ## 8. Client Agent 逻辑架构
 
@@ -390,6 +394,8 @@
 - `Desired State Sync / Command Poll`
 - `Command Result Report`
 
+其中 `Desired State Sync` 与 `Command Poll` 在第一版中属于同一控制同步交互的两个语义部分：同一响应中同时返回最新 `desiredState` 和 `pendingCommands`。
+
 控制面语义如下：
 
 - `desiredState` 是事实来源
@@ -422,6 +428,8 @@ Agent 首次启动后应执行以下流程：
 5. Agent 进入心跳与目标状态同步流程
 
 若 Agent 替换或重装，应重新注册并使旧注册项失效。
+
+旧身份被标记失效后，Gateway 必须拒绝该身份的所有后续注册、心跳、同步和数据上传请求。
 
 ## 15. Connector 运行模型与隔离策略
 
@@ -511,6 +519,8 @@ Agent 对每个 `Connector Instance` 负责：
 - `payload`
 - `metadata`
 
+其中 `metadata` 仅用于补充上下文信息，不参与 Gateway 的路由、去重、状态管理或控制决策。
+
 ### 17.2 分层标识模型
 
 系统采用分层标识模型，而不是单一消息 ID 模型。
@@ -522,6 +532,7 @@ Agent 对每个 `Connector Instance` 负责：
 - 由 Agent 在消息写入本地持久化队列时生成
 - 同一条本地持久化消息在重试上传时保持不变
 - 用于 Agent 本地队列主键和 Gateway Ingress 幂等接收
+- 推荐包含 `agentId` 前缀，并结合本地唯一序列或高熵标识生成，以保证系统实例内全局唯一
 
 #### recordDedupKey
 
@@ -605,6 +616,8 @@ Agent 对每个 `Connector Instance` 负责：
 
 - 要么两者都成功
 - 要么两者都不生效
+
+因此，Agent 本地存储引擎必须具备支撑该原子提交的最低事务能力，或提供等价的崩溃一致性原子提交语义。第一版不接受无法保证该语义的纯无事务持久化方案。
 
 这意味着：
 
